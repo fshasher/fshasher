@@ -1,34 +1,56 @@
 """
-The fshasher provides basic and utilitarian functionality to hash file system objects.
+fshasher provides basic and utilitarian functionality to hash file system objects.
 It is cross-platform, intuitive, and simple.
 """
 
 import hashlib
-import os
 import operator
 from pathlib import Path
-from typing import Final, Iterable, Protocol
+from typing import Iterable, Optional, Protocol
 
 
-def fshash(path: Path) -> str:
+def fshash(
+    path: Path,
+    *,
+    blocksize: int = 32768,
+    include: Optional[list[str]] = None,
+    exclude: Optional[list[str]] = None,
+    follow_links: bool = False) -> str:
     """
     Hashes the file object based on its contents.
 
     Args:
         path: The location to hash. Can be a file or a directory.
+        blocksize: The size of bytes to read at a time from the object.
+        include: Defines the files to include in the hashing. By default includes everything.
+            The elements are glob patterns as used by Pattern.match. Matching is done on the
+            relative file path not the absolute file path and is done for both directories
+            and files.
+        exclude: Defines the files to exclude in the hashing. By default excludes nothing.
+            The elements have the same semantics as for the include specification. If a file
+            is both included and excluded, it is excluded.
+        follow_links: Should links be followed and the linked contents hashed, or should
+            they be hashed as links only by location in the directory.
 
     Returns:
         The hash of the file object at the path as a string in hex format.
     """
-    __blocksize: Final[int] = 4096
-
     hash_obj = hashlib.sha256()
 
+    def should_hash(p: Path) -> bool:
+        include_matches = include and any(path.match(match) for match in include)
+        exclude_matches = exclude and any(path.match(match) for match in exclude)
+        if include:
+            return include_matches and not exclude_matches
+        else:
+            return not exclude_matches
+
     if path.is_file():
-        # This ensures that for a single file, the hash is the same as that for the content.
-        # This guarantee isn't required for a directory since there is no natural hashing
-        # value for a directory, and we do not include the filename.
-        _add_file_contents_to_hash(hash_obj, curpath, __blocksize)
+        if should_hash(path):
+            # This ensures that for a single file, the hash is the same as that for the content.
+            # This guarantee isn't required for a directory since there is no natural hashing
+            # value for a directory, and we do not include the filename.
+            _add_file_contents_to_hash(hash_obj, curpath, blocksize)
     else:
         paths = [path]
         while paths:
@@ -36,23 +58,21 @@ def fshash(path: Path) -> str:
 
             # Normalize the separators to '/'. This assumes the only other separator for
             # platforms that run python are '\' (notably Windows), and that all separators
-            # unambiguous. For example, Windows does not allow '/' in file names even though
-            # it does not have additional meaning.
-            relative_path_name = str(curpath.relative_to(path))
-            if os.sep == '\\':
-                fs_neutral_name = relative_path_name.replace(os.sep, '/')
-            else:
-                fs_neutral_name = relative_path_name
+            # are unambiguous. For example, Windows does not allow '/' in file names so it
+            # is impossible to have a file that cannot be isomorphically converted.
+            relative_path = curpath.relative_to(path)
+            fs_neutral_name = relative_path.as_posix()
 
-            if curpath.is_dir():
-                hash_obj.update(fs_neutral_name)
+            if should_hash(relative_path):
+                if curpath.is_dir():
+                    hash_obj.update(fs_neutral_name)
 
-                fs_iter = _cross_platform_stable_fs_iter(curpath)
-                for child in fs_iter:
-                    paths.append(child)
-            else:
-                hash_obj.update(fs_neutral_name)
-                _add_file_contents_to_hash(hash_obj, curpath, __blocksize)
+                    fs_iter = _cross_platform_stable_fs_iter(curpath)
+                    for child in fs_iter:
+                        paths.append(child)
+                else:
+                    hash_obj.update(fs_neutral_name)
+                    _add_file_contents_to_hash(hash_obj, curpath, blocksize)
 
     return hash_obj.hexdigest()
 
